@@ -148,3 +148,5 @@ dist-ssr
 *.sw?
 
 var
+
+repomix*

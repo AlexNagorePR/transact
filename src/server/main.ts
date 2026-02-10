@@ -4,29 +4,27 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import dotenvExpand from 'dotenv-expand';
 import session from 'express-session';
-import bcrypt from 'bcrypt';
 import FileStoreFactory from 'session-file-store';
 import path from 'path';
 import portfinder from 'portfinder';
 
 import utils from '@transitive-sdk/utils';
-
 import { COOKIE_NAME } from '@/common/constants.js';
-import { createAccount, getAccount, login, requireLogin } from '@/server/auth.js';
+import { login, requireLogin } from '@/server/auth.js';
 
-
-const FileStore = FileStoreFactory(session);
+import { Issuer, generators } from 'openid-client';
 
 dotenvExpand.expand(dotenv.config({path: './.env'}))
 
 const log = utils.getLogger('main');
 log.setLevel('debug');
 
+const FileStore = FileStoreFactory(session);
+
 const basePort = process.env.PORT || 3000;
 
 const app = express();
 app.use(express.json());
-FileStore(session);
 
 const fileStoreOptions = {
   path: path.join(process.env.TRANSACT_VAR_DIR + '/sessions'),
@@ -41,92 +39,173 @@ app.use(session({
   cookie: {maxAge: 3 * 24 * 60 * 60 * 1000},
 }));
 
-// if username and password are provided as env vars, create account if it
-// doesn't yet exists. This is used for initial bringup.
-if (process.env.TRANSACT_USER && process.env.TRANSACT_PASS) {
-  createAccount({
-    name: process.env.TRANSACT_USER,
-    password: process.env.TRANSACT_PASS,
-    email: process.env.TRANSACT_EMAIL || '',
-    admin: true
+
+let oidcClient;
+
+async function initializeOIDCClient() {
+   const issuer = await Issuer.discover(
+    'https://cognito-idp.eu-south-2.amazonaws.com/eu-south-2_grNLqDobH'
+  );
+  
+  oidcClient = new issuer.Client({
+    client_id: '647r0k8aqekluhfcqksrf1bhsk',
+    client_secret: process.env.COGNITO_CLIENT_SECRET,
+    redirect_uris: ['http://localhost:3000/auth/callback'],
+    response_types: ['code']
   });
-}
+
+  log.info('OIDC client initialized', {
+    issuer: issuer.issuer,
+    client_id: oidcClient.metadata.client_id,
+    redirect_uris: oidcClient.metadata.redirect_uris,
+  });
+};
+
+initializeOIDCClient().catch(err => {
+  log.error('Failed to initialize OIDC client', err);
+});
 
 // Example of a simple route
 app.get('/hello', (_, res) => {
   res.send('Hello Vite + React + TypeScript!');
 });
 
-// Login with username and password
-app.post('/api/login', async (req, res) => {
-  log.debug('/api/login:', req.body.name);
+// Login with OIDC provider (Cognito)
+app.get('/auth/login', (req, res) => {
+  if (!oidcClient) return res.status(500).send('OIDC client not initialized');
+  
+  const nonce = generators.nonce();
+  const state = generators.state();
 
-  const fail = (error: string | Error) => {
-    log.debug('login failed', req.body.name, error);
-    res.clearCookie(COOKIE_NAME).status(401).json({error, ok: false});
-  };
+  req.session.oidc ||= {};
+  req.session.oidc.pending ||= {};
+  req.session.oidc.pending[state] = { nonce, ts: Date.now() };
 
-  if (!req.body.name || !req.body.password) {
-    log.debug('missing credentials', req.body);
-    return fail('no account name or password given');
-    // on purpose not disclosing that the account doesn't exist
+  const authUrl = oidcClient.authorizationUrl({
+    scope: 'email openid phone',
+    state,
+    nonce,
+  });
+
+  res.redirect(authUrl);
+});
+
+app.get('/auth/callback', async (req: any, res) => {
+  try {
+    if (!oidcClient) return res.status(500).send('OIDC client not initialized');
+
+    if (req.query?.error) {
+      log.error('OIDC error on callback', req.query);
+      return res.status(400).send(`OIDC error: ${req.query.error}`);
+    }
+
+    const params = oidcClient.callbackParams(req);
+    const returnedState = params.state;
+
+    const pending = req.session?.oidc?.pending?.[returnedState];
+    if (!pending) {
+      log.warn('OIDC callback with unknown/expired state', { returnedState });
+      return res.status(400).send('Invalid/expired state. Please try again.');
+    }
+
+    delete req.session.oidc.pending[returnedState];
+
+    const tokenSet = await oidcClient.callback(
+      'http://localhost:3000/auth/callback',
+      params,
+      { nonce: pending.nonce, state: returnedState }
+    );
+
+    const claims = tokenSet.claims();
+    const groups: string[] = (claims['cognito:groups'] as string[]) || [];
+
+    if (!groups.includes('allowed')) {
+      req.session.user = null;
+      res.clearCookie(COOKIE_NAME);
+      return res.status(403).send('User not allowed');
+    }
+
+    const email = claims.email as string | undefined;
+    const userId = email || (claims.sub as string);
+
+    const accountLike = {
+      _id: userId,
+      email: email || '',
+      admin: groups.includes('admin'),
+      verified: true,
+      created: new Date(),
+    };
+
+    return login(req, res, { account: accountLike, redirect: '/dashboard/devices' });
+
+  } catch (err) {
+    if (res.headersSent) {
+      log.error('Callback error after headers sent', err);
+      return;
+    }
+    log.error('Callback error', err);
+    return res.status(500).send(`Callback error: ${err?.message || err}`);
   }
-
-  const account = await getAccount(req.body.name);
-  if (!account) {
-    log.info('no such account', req.body.name);
-    return fail('invalid credentials');
-    // on purpose not disclosing that the account doesn't exist
-  }
-
-  const valid = await bcrypt.compare(req.body.password, account.bcryptPassword);
-  if (!valid) {
-    log.info('wrong password for account', req.body.name);
-    return fail('invalid credentials');
-  }
-
-  login(req, res, {account, redirect: '/dashboard/devices'});
 });
 
 // Logout the user
-app.post('/api/logout', async (req, res, next) => {
+app.post('/api/logout', async (req, res) => {
   log.debug('/api/logout', req.session.user);
-  req.session.user = null
-  req.session.save((err) => {
-    if (err) {
-      log.error('failed to save session', err);
-      next(err);
+
+  req.session.user = null;
+  req.session.oidc = null;
+
+  req.session.save((saveErr) => {
+    if (saveErr) {
+      log.error('failed to save session', saveErr);
+      return res.status(500).json({ ok: false, error: 'Failed to save session' });
     }
-    req.session.regenerate((err) => {
-      if (err) {
-        log.error('failed to regenerate session', err);
-        next(err);
+
+    req.session.regenerate((regenErr) => {
+      if (regenErr) {
+        log.error('failed to regenerate session', regenErr);
+        return res.status(500).json({ ok: false, error: 'Failed to regenerate session' });
       }
       res.clearCookie(COOKIE_NAME).json({status: 'ok'});
     });
   })
 });
 
+app.get('/auth/logout', (req, res) => {
+  req.session.user = null;
+  req.session.oidc = null;
+
+  req.session.save(() => {
+    req.session.regenerate(() => {
+      res.clearCookie(COOKIE_NAME);
+
+      const cognitoDomain = process.env.COGNITO_DOMAIN;
+      const clientId = '647r0k8aqekluhfcqksrf1bhsk';
+      const logoutUrl = 'http://localhost:3000/';
+
+      const url =
+        `https://${cognitoDomain}/logout` +
+        `?client_id=${encodeURIComponent(clientId)}` +
+        `&logout_uri=${encodeURIComponent(logoutUrl)}`;
+
+      return res.redirect(url);
+    });
+  });
+});
 
 // Refresh the session cookie
-app.get('/api/refresh', async (req, res) => {
+app.get('/api/refresh', (req, res) => {
   const fail = (error) =>
     res.clearCookie(COOKIE_NAME).status(401).json({error, ok: false});
 
-  if (!req.session.user) {
+  const user = req.session?.user;
+
+  if (!user || !user._id) {
     log.info('no session user');
     return fail('no session');
   }
-  const account = await getAccount(req.session.user._id);
-  if (!account) {
-    log.info('no account for user', req.session.user._id);
-    return fail('invalid session');
-  }
-
-  login(req, res, {
-    account,
-    redirect: false
-  });
+  
+  return login(req, res, { account: user, redirect: false });
 });
 
 // Get a JWT token for the current user
@@ -161,7 +240,7 @@ const start = async () => {
 
   ViteExpress.listen(app, port, () => {
     console.log(`Server is listening on port ${port}`);
-    console.log(`Now open: http://localhost:${port}`);
+    console.log(`Now open: http://localhost:${port}/auth/login`);
   });
 }
 
