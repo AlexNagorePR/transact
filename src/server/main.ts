@@ -48,9 +48,9 @@ async function initializeOIDCClient() {
   );
   
   oidcClient = new issuer.Client({
-    client_id: '647r0k8aqekluhfcqksrf1bhsk',
+    client_id: process.env.COGNITO_CLIENT_ID,
     client_secret: process.env.COGNITO_CLIENT_SECRET,
-    redirect_uris: ['http://localhost:3000/auth/callback'],
+    redirect_uris: [process.env.COGNITO_REDIRECT_URI],
     response_types: ['code']
   });
 
@@ -111,7 +111,7 @@ app.get('/auth/callback', async (req: any, res) => {
     delete req.session.oidc.pending[returnedState];
 
     const tokenSet = await oidcClient.callback(
-      'http://localhost:3000/auth/callback',
+      process.env.COGNITO_REDIRECT_URI,
       params,
       { nonce: pending.nonce, state: returnedState }
     );
@@ -180,8 +180,8 @@ app.get('/auth/logout', (req, res) => {
       res.clearCookie(COOKIE_NAME);
 
       const cognitoDomain = process.env.COGNITO_DOMAIN;
-      const clientId = '647r0k8aqekluhfcqksrf1bhsk';
-      const logoutUrl = 'http://localhost:3000/';
+      const clientId = process.env.COGNITO_CLIENT_ID;
+      const logoutUrl = process.env.COGNITO_LOGOUT_URI;
 
       const url =
         `https://${cognitoDomain}/logout` +
@@ -240,7 +240,7 @@ const start = async () => {
 
   ViteExpress.listen(app, port, () => {
     console.log(`Server is listening on port ${port}`);
-    console.log(`Now open: http://localhost:${port}/auth/login`);
+    console.log(`Now open: ${process.env.COGNITO_REDIRECT_URI}`);
   });
 }
 
