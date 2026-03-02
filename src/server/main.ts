@@ -30,6 +30,33 @@ const fileStoreOptions = {
   path: path.join(process.env.TRANSACT_VAR_DIR + '/sessions'),
 };
 
+function signPortalApiJWT() {
+  return jwt.sign(
+    {
+      userId: 'phenomenonrobotics',
+      api: 1,
+      id: process.env.TRANSITIVE_USER,
+      validity: 60, // token corto
+    },
+    process.env.JWT_SECRET!
+  );
+};
+
+async function fetchPortalApi(token: string, url: string, options: { timeoutMs?: number } = {}) {
+  const response = await fetch(
+      "https://portal.transitiverobotics.com/@transitive-robotics/_robot-agent/api/v1/info/",
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    );
+  if (!response.ok) {
+    throw new Error(`Portal API error: ${response.status} ${response.statusText}`);
+  }
+  return await response.json();
+};
+
 // Set up session middleware
 app.use(session({
   store: new FileStore(fileStoreOptions),
@@ -63,11 +90,6 @@ async function initializeOIDCClient() {
 
 initializeOIDCClient().catch(err => {
   log.error('Failed to initialize OIDC client', err);
-});
-
-// Example of a simple route
-app.get('/hello', (_, res) => {
-  res.send('Hello Vite + React + TypeScript!');
 });
 
 // Login with OIDC provider (Cognito)
@@ -229,6 +251,34 @@ app.post('/api/getJWT', requireLogin, (req, res) => {
   res.json({token});
 });
 
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/api/devices', async (req, res) => {
+  try {
+    const token = signPortalApiJWT();
+
+    const url =
+      'https://portal.transitiverobotics.com/@transitive-robotics/_robot-agent/api/v1/info/';
+
+    const data = await fetchPortalApi(token, url, { timeoutMs: 7000 });
+
+    // 🔹 Conversión automática a array conservando ID
+    res.json(
+      Object.entries(data || {}).map(([id, value]) => ({
+        id,
+        ...value,
+      }))
+    );
+  } catch (err: any) {
+    res.status(502).json({ error: 'Portal API request failed' });
+  }
+});
+
 app.use('/dashboard/', requireLogin);
 
 const start = async () => {
@@ -238,7 +288,7 @@ const start = async () => {
     stopPort: basePort + 1000 // maximum port
   });
 
-  ViteExpress.listen(app, port, () => {
+  app.listen(port, () => {
     console.log(`Server is listening on port ${port}`);
     console.log(`Now open: ${process.env.COGNITO_REDIRECT_URI}`);
   });

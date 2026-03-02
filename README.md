@@ -51,7 +51,7 @@ Your local transAct deployment will interface with a Transitive deployment to fi
 
 1. Go to https://portal.transitiverobotics.com and create an account.
 1. In your local transAct clone, copy `sample.env` file to `.env` and edit it:
-   - **VITE_TRANSITIVE_USER** set this to your Transitive username, created in Step 1.
+   - **TRANSITIVE_USER** set this to your Transitive username, created in Step 1.
    - **JWT_SECRET** set this to your JWT secret found on your Security page: https://portal.transitiverobotics.com/security.
 1. Run `npm install` to install all dependencies.
 
