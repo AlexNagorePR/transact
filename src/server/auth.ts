@@ -13,38 +13,48 @@ interface AccountLike {
 
 /** given an account (object from DB), create the cookie payload string */
 const createCookie = (account: AccountLike): string => {
-  if (!account._id) {
-    throw new Error('Account must have _id');
-  }
+  if (!account._id) throw new Error('Account must have _id');
   
   const payload = {
       user: account._id,
-      verified: account.verified,
-      admin: account.admin || false,
+      verified: Boolean(account.verified),
+      admin: Boolean(account.admin),
   };
+
   return JSON.stringify(payload);
 };
 
-/** simple middleware to check whether the user is logged in */
-export const requireLogin = (req, res, next) => {
-  if (req.session && req.session.user) {
+function wantsJson(req: any): boolean {
+  if (req.path?.startsWith('/api/')) return true;
+
+  const accept = String(req.headers?.accept || '').toLowerCase();
+  return Boolean(req.xhr) || accept.includes('json');
+}
+
+export const requireLogin = (req: any, res: any, next: any) => {
+  const user = req.session?.user;
+  
+  if (user && user._id) {
     return next();
-  }
+  } 
 
   log.debug('not logged in', req.url);
 
-  if (req.xhr || req.headers.accept.indexOf('json') > -1) {
-    res.status(401).json({
+  if (wantsJson(req)) {
+    return res.status(401).json({
       error: 'Not authorized. You need to be logged in. Please log out and back in.',
       ok: false,
     });
   }
-  
+    
   return res.redirect('/auth/login');
 };
 
-/** Log the user of this request into the given account. */
-export const  login = (req, res, opts: { account: AccountLike, redirect?: string | false }) => {
+export const  login = (
+  req: any,
+  res: any,
+  opts: { account: AccountLike, redirect?: string | false }
+) => {
   const { account, redirect = false } = opts;
   
   req.session.user = account;
@@ -53,5 +63,6 @@ export const  login = (req, res, opts: { account: AccountLike, redirect?: string
   if (redirect) {
     return res.redirect(redirect);
   }
+
   return res.json({ status: 'ok' });
 };

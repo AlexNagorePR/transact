@@ -1,17 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import request from 'supertest';
 
-vi.mock('@transitive-sdk/utils', async () => {
-  const mod = await import('./mocks/transitive-utils');
-  return { default: mod.default };
-});
+vi.mock('@/server/auth.js', () => ({
+  login: vi.fn(),
+  requireLogin: (_req: any, _res: any, next: any) => next(),
 
-vi.mock('@/server/auth.js', () => {
-  return {
-    login: vi.fn(),
-    requireLogin: (_req: any, _res: any, next: any) => next(),
-  };
-});
+}));
 
 import { createApp } from '@/server/app.js';
 
