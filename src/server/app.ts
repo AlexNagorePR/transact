@@ -196,10 +196,8 @@ export function createApp(deps: { oidcClient?: OidcClientLike } = {}) {
         validitySeconds: 60,
       });
 
-      console.log(config.jwtSecret, config.transitiveUser);
-
       const url =
-        'https://portal.transitiverobotics.com/@transitive-robotics/_robot-agent/api/v1/info/';
+        'https://portal.transitiverobotics.com/@transitive-robotics/_robot-agent/api/v1/running/';
       const data = await fetchPortalApi<any>(token, url, { timeoutMs: 7000 });
 
       return res.json(
